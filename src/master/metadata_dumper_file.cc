@@ -22,6 +22,7 @@
 #include "slogger/slogger.h"
 
 #include "master/metadata_dumper_file.h"
+#include "metadumper_lib/metadumper_lib.h"
 
 #include <string>
 
@@ -30,13 +31,7 @@
 #include <master/metadata_backend_common.h>
 #include <master/metadata_backend_interface.h>
 
-static bool createPipe(int pipefds[2]) {
-	if (pipe(pipefds) != 0) {
-		safs_pretty_errlog(LOG_ERR, "pipe failed");
-		return false;
-	}
-	return true;
-}
+
 
 MetadataDumperFile::MetadataDumperFile(const std::string &metadataFilename,
                                        const std::string &metadataTmpFilename)
@@ -46,7 +41,24 @@ MetadataDumperFile::MetadataDumperFile(const std::string &metadataFilename,
       dumpingProcessPollFdsPos_(-1),
       dumpingProcessOutputEmpty_(true),
       metadataFilename_(metadataFilename),
-      metadataTmpFilename_(metadataTmpFilename) {}
+      metadataTmpFilename_(metadataTmpFilename) {
+    
+    // Load configuration
+    auto& config = saunafs::metadumper::MetadumperConfig::getInstance();
+    config.loadFromEnvironment();
+    
+    serviceSocketPath_ = config.getServiceSocketPath();
+    
+    // Only initialize service client if service architecture is enabled
+    if (config.useServiceArchitecture()) {
+        try {
+            serviceClient_ = std::make_unique<saunafs::metadumper::MetadumperClient>(serviceSocketPath_);
+        } catch (const std::exception& e) {
+            safs_pretty_syslog(LOG_WARNING, "Failed to initialize metadumper client: %s", e.what());
+            serviceClient_ = nullptr;
+        }
+    }
+}
 
 bool MetadataDumperFile::dumpSucceeded() const {
 	return dumpingSucceeded_;
@@ -100,8 +112,70 @@ bool MetadataDumperFile::start(DumpType &dumpType, uint64_t checksum) {
 		return false;
 	}
 
-	int pipeFd[2] = {-1, -1}; // invalid fds
+	auto& config = saunafs::metadumper::MetadumperConfig::getInstance();
+	
+	// If service architecture is disabled, use original fork-based approach
+	if (!config.useServiceArchitecture()) {
+		return startOriginalForkBased(dumpType, checksum);
+	}
+
+	// Reset state for service-based approach
 	dumpingProcessFd_ = -1;
+	currentRequestId_.clear();
+	
+	/*
+	 * Changelog files were rotated before entering this function.
+	 * Current changelog is now kChangelogFilename + ".1".
+	 */
+	std::string changelogFilename = kChangelogFilename;
+	changelogFilename += ".1";
+	
+	// Check if service is enabled and available
+	if (config.isServiceEnabled() && useMetarestore_ && dumpingSucceeded_ && 
+	    serviceClient_ && serviceClient_->isServiceAvailable()) {
+		// Check if changelog file exists
+		if (access(changelogFilename.c_str(), F_OK) == -1) {
+			if (errno == ENOENT || errno == EACCES) {
+				safs_pretty_syslog(LOG_ERR, "no current changelog, dump by master");
+			} else {
+				safs_pretty_errlog(LOG_ERR, "access error, dump by master");
+			}
+			dumpingSucceeded_ = false;
+		} else {
+			// Send dump request to service
+			std::string outputDir = metadataTmpFilename_.substr(0, metadataTmpFilename_.find_last_of("/"));
+			currentRequestId_ = serviceClient_->sendDumpRequest(
+				checksum, changelogFilename, outputDir, metadataFilename_, gStoredPreviousBackMetaCopies);
+			
+			if (!currentRequestId_.empty()) {
+				safs::log_info("Sent dump request to service with ID: {}", currentRequestId_);
+				dumpingProcessFd_ = 1; // Use dummy fd to indicate service request is active
+				return false; // Parent continues
+			} else {
+				safs_pretty_syslog(LOG_WARNING, "Failed to send dump request to service, falling back to local dump");
+				dumpingSucceeded_ = false;
+			}
+		}
+	}
+
+	// Check if fallback is enabled
+	if (!config.isFallbackEnabled()) {
+		safs_pretty_syslog(LOG_ERR, "Service unavailable and fallback disabled, cannot dump metadata");
+		dumpType = DumpType::kForegroundDump;
+		dumpingSucceeded_ = false;
+		return false;
+	}
+
+	// Fallback to original fork-based approach
+	return startOriginalForkBased(dumpType, checksum);
+}
+
+bool MetadataDumperFile::startOriginalForkBased(DumpType& dumpType, uint64_t checksum) {
+	safs_pretty_syslog(LOG_INFO, "Using original fork-based metadata dumping");
+	
+	int pipeFd[2] = {-1, -1};
+	dumpingProcessFd_ = -1;
+	
 	/*
 	 * Changelog files were rotated before entering this function.
 	 * Current changelog is now kChangelogFilename + ".1".
@@ -118,7 +192,8 @@ bool MetadataDumperFile::start(DumpType &dumpType, uint64_t checksum) {
 	}
 
 	// can't communicate with child? foreground dump
-	if (!createPipe(pipeFd)) {
+	if (pipe(pipeFd) != 0) {
+		safs_pretty_errlog(LOG_ERR, "pipe failed");
 		safs_pretty_syslog(LOG_ERR, "couldn't communicate with child, foreground dump");
 		dumpType = DumpType::kForegroundDump;
 		dumpingSucceeded_ = false;
@@ -138,7 +213,7 @@ bool MetadataDumperFile::start(DumpType &dumpType, uint64_t checksum) {
 		case 0:
 			safs::log_info("Child process started for metadata dumping (pid: {})", getpid());
 			close(pipeFd[0]); // ignore close error
-			if (dup2(pipeFd[1], STDOUT_FILENO)  == -1) {
+			if (dup2(pipeFd[1], STDOUT_FILENO) == -1) {
 				// can't give the response
 				safs_pretty_errlog(LOG_ERR, "dup2 failed, dump by master");
 				dumpingSucceeded_ = false;
@@ -195,6 +270,36 @@ void MetadataDumperFile::pollServe(const std::vector<pollfd> &pdesc) {
 	if (dumpingProcessPollFdsPos_ == -1) {
 		return;
 	}
+
+	// Check if we're using the service
+	if (!currentRequestId_.empty() && serviceClient_) {
+		saunafs::metadumper::DumpResponse response;
+		if (serviceClient_->pollStatus(currentRequestId_, response)) {
+			// Request completed
+			dumpingProcessOutputEmpty_ = false;
+			dumpingSucceeded_ = response.success;
+			
+			if (response.success) {
+				safs::log_info("Service metadata dump completed successfully: {}", response.outputFile);
+				// Handle file transfer if needed (for remote service)
+				// For now, assume local service writes directly to the expected location
+			} else {
+				safs::log_warn("Service metadata dump failed: {}", response.errorMessage);
+				// Mark service as failed for future requests
+				auto& config = saunafs::metadumper::MetadumperConfig::getInstance();
+				if (!config.isFallbackEnabled()) {
+					dumpingSucceeded_ = false;
+				}
+			}
+			
+			dumpingFinished();
+			return;
+		}
+		// Still in progress, continue polling
+		return;
+	}
+
+	// Original pipe-based polling for fallback fork approach
 	if (pdesc[dumpingProcessPollFdsPos_].revents & POLLIN) {
 		char buffer[1024];
 		int ret = read(dumpingProcessFd_, buffer, sizeof(buffer) - 1);
@@ -222,10 +327,18 @@ void MetadataDumperFile::pollServe(const std::vector<pollfd> &pdesc) {
 }
 
 void MetadataDumperFile::dumpingFinished() {
-	if (close(dumpingProcessFd_) == -1) {
-		safs_pretty_errlog(LOG_ERR, "pipe close failed");
+	if (!currentRequestId_.empty()) {
+		// Service-based dump finished
+		currentRequestId_.clear();
+		dumpingProcessFd_ = -1;
+	} else if (dumpingProcessFd_ != -1) {
+		// Fork-based dump finished
+		if (close(dumpingProcessFd_) == -1) {
+			safs_pretty_errlog(LOG_ERR, "pipe close failed");
+		}
+		dumpingProcessFd_ = -1;
 	}
-	dumpingProcessFd_ = -1;
+	
 	dumpingProcessPollFdsPos_ = -1;
 	if (dumpingProcessOutputEmpty_) {
 		safs_pretty_syslog(LOG_WARNING, "the dumping process finished without producing output");

@@ -3,6 +3,9 @@ add_definitions(-DAPPNAME=sfsmaster -DAPP_EXAMPLES_SUBDIR="${SFSMASTER_EXAMPLES_
 
 collect_sources(MASTER)
 
+# Include protocol.cc from metadumper_service to resolve undefined references
+list(APPEND MASTER_SOURCES ../metadumper_service/protocol.cc)
+
 if(NOT DB_FOUND)
   list(REMOVE_ITEM MASTER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/hstring_bdbstorage.cc")
 endif()

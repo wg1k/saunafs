@@ -460,3 +460,9 @@ endif()
 include(Packing)
 
 include(GoogleTest)
+
+
+add_subdirectory(src/metadumper_lib)
+add_subdirectory(src/metadumper_service)
+
+

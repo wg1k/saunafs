@@ -30,6 +30,8 @@
 
 #include "common/time_utils.h"
 #include "master/metadata_dumper_interface.h"
+#include "master/metadumper_client.h"
+#include "master/metadumper_config.h"
 
 class MetadataDumperFile : public IMetadataDumper {
 public:
@@ -57,6 +59,9 @@ private:
 	void waitUntilFinished(SteadyDuration timeout);
 
 	void dumpingFinished();
+	
+	/// Original fork-based implementation for backward compatibility
+	bool startOriginalForkBased(DumpType& dumpType, uint64_t checksum);
 
 	/// how long can the decimal representation of a(n) (u)int64 be
 	static const uint32_t kInt64MaxDecimalLength = 21;
@@ -75,6 +80,15 @@ private:
 
 	/// the dumping process has written something
 	bool dumpingProcessOutputEmpty_;
+
+	/// metadumper service client
+	std::unique_ptr<saunafs::metadumper::MetadumperClient> serviceClient_;
+	
+	/// current dump request ID
+	std::string currentRequestId_;
+	
+	/// service socket path
+	std::string serviceSocketPath_;
 
 	std::string metarestorePath_;
 	std::string metadataFilename_;
