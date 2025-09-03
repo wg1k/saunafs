@@ -2,7 +2,7 @@
 
 #include <sstream>
 
-namespace saunafs {
+namespace safs {
 namespace metadumper {
 
 std::string DumpRequest::serialize() const {
@@ -55,4 +55,4 @@ DumpResponse DumpResponse::deserialize(const std::string &data) {
 }
 
 }  // namespace metadumper
-}  // namespace saunafs
+}  // namespace safs

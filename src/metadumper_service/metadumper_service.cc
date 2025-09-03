@@ -2,29 +2,18 @@
 
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <cerrno>
 #include <cstring>
+#include <ctime>
 #include <iostream>
 #include <mutex>
-
 #include "common/cwrap.h"
 #include "common/rotate_files.h"
-#include "common/setup.h"
-#include "master/changelog.h"
-#include "master/chunks.h"
-#include "master/hstring_memstorage.h"
-#include "master/hstring_storage.h"
-#include "master/metadata_backend_common.h"
-#include "master/metadata_backend_file.h"
-#include "master/metadata_backend_interface.h"
-#include "master/restore.h"
-#include "metarestore/merger.h"
 #include "slogger/slogger.h"
 
-#include "master/filesystem.h"
-
-namespace saunafs {
+namespace safs {
 namespace metadumper {
 
 MetadumperService::MetadumperService(const std::string &socketPath)
@@ -62,7 +51,7 @@ bool MetadumperService::start() {
 	}
 
 	running_.store(true);
-	serverThread_ = std::thread(&MetadumperService::serverLoop, this);
+	serviceThread_ = std::thread(&MetadumperService::run, this);
 
 	safs_pretty_syslog(LOG_INFO, "Metadumper service started on socket: %s", socketPath_.c_str());
 	return true;
@@ -78,7 +67,7 @@ void MetadumperService::stop() {
 		serverSocket_ = -1;
 	}
 
-	if (serverThread_.joinable()) { serverThread_.join(); }
+	if (serviceThread_.joinable()) { serviceThread_.join(); }
 
 	unlink(socketPath_.c_str());
 	safs_pretty_syslog(LOG_INFO, "Metadumper service stopped");
@@ -86,32 +75,34 @@ void MetadumperService::stop() {
 
 bool MetadumperService::isRunning() const { return running_.load(); }
 
-void MetadumperService::serverLoop() {
-	while (running_.load()) {
-		fd_set readfds;
-		FD_ZERO(&readfds);
-		FD_SET(serverSocket_, &readfds);
+void MetadumperService::run() {
+    while (running_.load()) {
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(serverSocket_, &readfds);
 
-		struct timeval timeout;
-		timeout.tv_sec = 1;
-		timeout.tv_usec = 0;
+        struct timeval timeout;
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
 
-		int result = select(serverSocket_ + 1, &readfds, nullptr, nullptr, &timeout);
-		if (result == -1) {
-			if (errno != EINTR) { safs_pretty_errlog(LOG_ERR, "select failed in server loop"); }
-			continue;
-		}
+        int result = select(serverSocket_ + 1, &readfds, nullptr, nullptr, &timeout);
+        if (result == -1) {
+            if (errno != EINTR) {
+                safs_pretty_errlog(LOG_ERR, "select failed in server loop");
+            }
+            continue;
+        }
 
-		if (result > 0 && FD_ISSET(serverSocket_, &readfds)) {
-			int clientSocket = accept(serverSocket_, nullptr, nullptr);
-			if (clientSocket != -1) {
-				std::thread clientThread(&MetadumperService::handleClient, this, clientSocket);
-				clientThread.detach();
-			}
-		}
+        if (result > 0 && FD_ISSET(serverSocket_, &readfds)) {
+            int clientSocket = accept(serverSocket_, nullptr, nullptr);
+            if (clientSocket != -1) {
+                std::thread clientThread(&MetadumperService::handleClient, this, clientSocket);
+                clientThread.detach();
+            }
+        }
 
 		cleanupOldFiles();
-	}
+    }
 }
 
 void MetadumperService::handleClient(int clientSocket) {
@@ -148,55 +139,6 @@ void MetadumperService::handleClient(int clientSocket) {
 
 bool MetadumperService::processDumpRequest(const DumpRequest &request, DumpResponse &response) {
 	try {
-		// Initialize the filesystem backend
-		hstorage::Storage::reset(new hstorage::MemStorage());
-		if (!gMetadataBackend) { gMetadataBackend = std::make_unique<MetadataBackendFile>(); }
-
-		// Initialize filesystem
-		if (fs_init(request.metadataFile.c_str(), 1, true) != 0) {
-			response.errorMessage =
-			    "Failed to initialize filesystem from metadata file: " + request.metadataFile;
-			safs_pretty_syslog(LOG_ERR, "Failed to initialize filesystem from: %s",
-			                   request.metadataFile.c_str());
-			return false;
-		}
-
-		if (fs_getversion() == 0) {
-			response.errorMessage = "Invalid metadata version (0)";
-			safs_pretty_syslog(LOG_ERR, "Invalid metadata version (0)");
-			return false;
-		}
-
-		// Process changelog files
-		std::vector<std::string> filenames;
-		if (!request.changelogFile.empty() && access(request.changelogFile.c_str(), F_OK) == 0) {
-			filenames.push_back(request.changelogFile);
-		} else if (!request.changelogFile.empty()) {
-			safs_pretty_syslog(LOG_WARNING, "Changelog file not accessible: %s",
-			                   request.changelogFile.c_str());
-		}
-
-		merger_start(filenames, 10000);
-		uint8_t status = merger_loop();
-
-		if (status != SAUNAFS_STATUS_OK) {
-			response.errorMessage = "Merge operation failed with status: " + std::to_string(status);
-			safs_pretty_syslog(LOG_ERR, "Merge operation failed with status: %d", status);
-			return false;
-		}
-
-		// Verify checksum
-		uint64_t calculatedChecksum = fs_checksum(ChecksumMode::kForceRecalculate);
-		if (calculatedChecksum != request.checksum) {
-			response.errorMessage = "Checksum mismatch: expected " +
-			                        std::to_string(request.checksum) + ", calculated " +
-			                        std::to_string(calculatedChecksum);
-			safs_pretty_syslog(LOG_ERR,
-			                   "Checksum mismatch: expected %" PRIu64 ", calculated %" PRIu64,
-			                   request.checksum, calculatedChecksum);
-			return false;
-		}
-
 		// Generate timestamped output filename
 		auto now = std::chrono::system_clock::now();
 		auto time_t = std::chrono::system_clock::to_time_t(now);
@@ -216,49 +158,163 @@ bool MetadumperService::processDumpRequest(const DumpRequest &request, DumpRespo
 			}
 		}
 
-		// Save metadata
-		try {
-			fs_term(outputFile.c_str(), true);
-		} catch (const std::exception &e) {
-			response.errorMessage = "Failed to save metadata file: " + std::string(e.what());
-			safs_pretty_syslog(LOG_ERR, "Failed to save metadata file: %s", e.what());
+		// Call sfsmetarestore tool to perform the actual dump
+		std::string checksumStringified = std::to_string(request.checksum);
+		std::string storedMetaCopies = std::to_string(request.storedMetaCopies);
+
+		// Find sfsmetarestore binary path
+		std::string metarestorePath = "/usr/sbin/sfsmetarestore";
+		if (access(metarestorePath.c_str(), X_OK) != 0) {
+			// Try alternative paths
+			metarestorePath = "/usr/local/sbin/sfsmetarestore";
+			if (access(metarestorePath.c_str(), X_OK) != 0) {
+				metarestorePath = "sfsmetarestore";  // Hope it's in PATH
+			}
+		}
+
+		// Prepare arguments for sfsmetarestore
+		std::vector<std::string> args = {metarestorePath, "-m", request.metadataFile, "-o",
+		                                 outputFile,      "-k", checksumStringified,  "-B",
+		                                 storedMetaCopies};
+
+		// Add changelog file if provided
+		if (!request.changelogFile.empty() && access(request.changelogFile.c_str(), F_OK) == 0) {
+			args.push_back("-#");
+			args.push_back(request.changelogFile);
+		}
+
+		// Convert to char* array for execv
+		std::vector<char *> argv;
+		for (const auto &arg : args) { argv.push_back(const_cast<char *>(arg.c_str())); }
+		argv.push_back(nullptr);
+
+		safs_pretty_syslog(LOG_INFO, "Executing sfsmetarestore for dump request %s",
+		                   request.requestId.c_str());
+
+		// Create pipe for communication with child process
+		int pipeFd[2];
+		if (pipe(pipeFd) != 0) {
+			response.errorMessage = "Failed to create pipe for sfsmetarestore communication";
+			safs_pretty_syslog(LOG_ERR, "Failed to create pipe: %s", strerror(errno));
 			return false;
 		}
 
-		// If the request specifies a different output path, transfer the file
-		if (request.outputPath != outputFile.substr(0, outputFile.find_last_of("/"))) {
-			std::string finalOutputFile =
-			    request.outputPath + "/" + outputFile.substr(outputFile.find_last_of("/") + 1);
-			if (!FileTransfer::atomicFileReplace(outputFile, finalOutputFile)) {
-				response.errorMessage = "Failed to transfer output file to requested location";
-				safs_pretty_syslog(LOG_ERR, "Failed to transfer output file to: %s",
-				                   finalOutputFile.c_str());
+		// Fork and execute sfsmetarestore
+		pid_t pid = fork();
+		if (pid == -1) {
+			close(pipeFd[0]);
+			close(pipeFd[1]);
+			response.errorMessage = "Failed to fork process for sfsmetarestore";
+			safs_pretty_syslog(LOG_ERR, "Failed to fork: %s", strerror(errno));
+			return false;
+		} else if (pid == 0) {
+			// Child process
+			close(pipeFd[0]);  // Close read end
+
+			// Redirect stdout to pipe
+			if (dup2(pipeFd[1], STDOUT_FILENO) == -1) {
+				safs_pretty_syslog(LOG_ERR, "Failed to redirect stdout: %s", strerror(errno));
+				exit(1);
+			}
+			close(pipeFd[1]);
+
+			// Set nice value for lower priority
+			if (nice(10) == -1) {
+				safs_pretty_syslog(LOG_WARNING, "Failed to set nice value: %s", strerror(errno));
+			}
+
+			// Execute sfsmetarestore
+			execv(metarestorePath.c_str(), argv.data());
+			safs_pretty_syslog(LOG_ERR, "Failed to execute sfsmetarestore: %s", strerror(errno));
+			exit(1);
+		} else {
+			// Parent process
+			close(pipeFd[1]);  // Close write end
+
+			// Read output from child process
+			char buffer[1024];
+			std::string output;
+			ssize_t bytesRead;
+
+			while ((bytesRead = read(pipeFd[0], buffer, sizeof(buffer) - 1)) > 0) {
+				buffer[bytesRead] = '\0';
+				output += buffer;
+			}
+			close(pipeFd[0]);
+
+			// Wait for child process to complete
+			int status;
+			if (waitpid(pid, &status, 0) == -1) {
+				response.errorMessage = "Failed to wait for sfsmetarestore process";
+				safs_pretty_syslog(LOG_ERR, "Failed to wait for child process: %s",
+				                   strerror(errno));
 				return false;
 			}
-			response.outputFile = finalOutputFile;
-		} else {
-			response.outputFile = outputFile;
+
+			// Check exit status
+			if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+				// Success
+				response.outputFile = outputFile;
+				safs_pretty_syslog(LOG_INFO, "Successfully completed dump request %s, output: %s",
+				                   request.requestId.c_str(), outputFile.c_str());
+
+				// Parse output for any additional information
+				if (!output.empty() && output.find("OK") != std::string::npos) {
+					safs_pretty_syslog(LOG_INFO, "sfsmetarestore output: %s", output.c_str());
+				}
+
+				return true;
+			} else {
+				// Failure
+				response.errorMessage =
+				    "sfsmetarestore failed with exit code: " + std::to_string(WEXITSTATUS(status));
+				if (!output.empty()) { response.errorMessage += ", output: " + output; }
+				safs_pretty_syslog(LOG_ERR, "sfsmetarestore failed for request %s: %s",
+				                   request.requestId.c_str(), response.errorMessage.c_str());
+
+				// Clean up failed output file
+				unlink(outputFile.c_str());
+				return false;
+			}
 		}
 
-		safs_pretty_syslog(LOG_INFO, "Successfully dumped metadata to: %s",
-		                   response.outputFile.c_str());
-		return true;
-
 	} catch (const std::exception &e) {
-		response.errorMessage = std::string("Exception during dump: ") + e.what();
-		safs_pretty_syslog(LOG_ERR, "Exception during dump: %s", e.what());
+		response.errorMessage =
+		    std::string("Exception during sfsmetarestore execution: ") + e.what();
+		safs_pretty_syslog(LOG_ERR, "Exception during dump request %s: %s",
+		                   request.requestId.c_str(), e.what());
 		return false;
 	} catch (...) {
-		response.errorMessage = "Unknown exception during dump";
-		safs_pretty_syslog(LOG_ERR, "Unknown exception during dump");
+		response.errorMessage = "Unknown exception during sfsmetarestore execution";
+		safs_pretty_syslog(LOG_ERR, "Unknown exception during dump request %s",
+		                   request.requestId.c_str());
 		return false;
+	}
+}
+void MetadumperService::rotateFiles(const std::string &baseFilename, int maxCopies) {
+	if (maxCopies <= 0) return;
+
+	// Remove the oldest backup if it exists
+	std::string oldestBackup = baseFilename + "." + std::to_string(maxCopies);
+	unlink(oldestBackup.c_str());
+
+	// Rotate existing backups
+	for (int i = maxCopies - 1; i >= 1; i--) {
+		std::string oldName = baseFilename + "." + std::to_string(i);
+		std::string newName = baseFilename + "." + std::to_string(i + 1);
+		rename(oldName.c_str(), newName.c_str());
+	}
+
+	// Move current file to .1
+	if (access(baseFilename.c_str(), F_OK) == 0) {
+		std::string firstBackup = baseFilename + ".1";
+		rename(baseFilename.c_str(), firstBackup.c_str());
 	}
 }
 
 void MetadumperService::cleanupOldFiles() {
 	// Implement cleanup logic for old dump files if needed
-	// This could be based on age or number of files to keep
-}
+}  // This could be based on age or number of files to keep
 
 }  // namespace metadumper
-}  // namespace saunafs
+}  // namespace safs

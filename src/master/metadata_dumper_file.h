@@ -59,7 +59,7 @@ private:
 	void waitUntilFinished(SteadyDuration timeout);
 
 	void dumpingFinished();
-	
+
 	/// Original fork-based implementation for backward compatibility
 	bool startOriginalForkBased(DumpType& dumpType, uint64_t checksum);
 
@@ -82,11 +82,11 @@ private:
 	bool dumpingProcessOutputEmpty_;
 
 	/// metadumper service client
-	std::unique_ptr<saunafs::metadumper::MetadumperClient> serviceClient_;
-	
+	std::unique_ptr<safs::metadumper::MetadumperClient> serviceClient_;
+
 	/// current dump request ID
 	std::string currentRequestId_;
-	
+
 	/// service socket path
 	std::string serviceSocketPath_;
 

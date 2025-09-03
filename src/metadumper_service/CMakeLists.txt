@@ -1,37 +1,25 @@
-include_directories(${CMAKE_CURRENT_SOURCE_DIR} ../master)
 add_definitions(-DMETARESTORE)
+add_definitions(-DMETADUMPER_SERVICE)
 add_definitions(-DAPPNAME=saunafs-metadumper -DAPP_EXAMPLES_SUBDIR="${USR_SHARE_DOC}")
 
-collect_sources(METADUMPER_SERVICE)
+aux_source_directory(. METADUMPER_SERVICE_SOURCES)
 
-# Add file_transfer.cc to the sources
-list(APPEND METADUMPER_SERVICE_SOURCES file_transfer.cc)
+add_library(metadumper_service_lib "")
+target_sources(metadumper_service_lib PRIVATE ${METADUMPER_SERVICE_SOURCES})
+target_include_directories(metadumper_service_lib PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include>
+    PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-# Include merger.cc from metarestore to resolve undefined references
-list(APPEND METADUMPER_SERVICE_SOURCES ../metarestore/merger.cc)
+target_link_libraries(metadumper_service_lib metadumper_lib)
 
-file(GLOB METADUMPER_SERVICE_MASTER_SOURCES ../master/filesystem*.cc)
-
-if(DB_FOUND)
-    file(GLOB METADUMPER_SERVICE_HSTRING_SOURCES ../master/hstring_*storage.cc)
-else()
-    file(GLOB METADUMPER_SERVICE_HSTRING_SOURCES ../master/hstring_memstorage.cc)
-endif()
-
-file(GLOB METADUMPER_SERVICE_BACKEND_SOURCES ../master/metadata_backend*.cc)
-
-add_library(metadumper_service_lib ${METADUMPER_SERVICE_SOURCES} ${METADUMPER_SERVICE_MASTER_SOURCES} ${METADUMPER_SERVICE_HSTRING_SOURCES}
-    ${METADUMPER_SERVICE_BACKEND_SOURCES}
-    ../master/acl_storage.cc ../master/chunks.cc ../common/quota_database.cc ../master/chunk_goal_counters.cc
-    ../master/restore.cc ../master/locks.cc ../master/task_manager.cc ../master/snapshot_task.cc
-    ../master/metadata_loader.cc ../master/setgoal_task.cc ../master/settrashtime_task.cc
-    ../master/changelog.cc)
-
-target_link_libraries(metadumper_service_lib sfscommon metadumper_lib)
-if(JUDY_LIBRARY)
-    target_link_libraries(metadumper_service_lib ${JUDY_LIBRARY})
-endif()
-
-add_executable(saunafs-metadumper ${METADUMPER_SERVICE_MAIN})
+add_executable(saunafs-metadumper ${MAIN_SRC})
+target_include_directories(saunafs-metadumper PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include>
+    PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(saunafs-metadumper metadumper_service_lib sfscommon ${PAM_LIBRARIES})
+if(SYSTEMD_FOUND)
+    target_link_libraries(saunafs-metadumper ${SYSTEMD_LIBRARIES})
+endif()
 install(TARGETS saunafs-metadumper RUNTIME DESTINATION ${SBIN_SUBDIR})

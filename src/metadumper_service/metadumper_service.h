@@ -6,42 +6,40 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
-#include <queue>
 #include <string>
 #include <thread>
 #include <unordered_map>
 
-#include "metadumper_service/file_transfer.h"
 #include "metadumper_service/protocol.h"
 
-namespace saunafs {
+namespace safs {
 namespace metadumper {
 
 class MetadumperService {
 public:
-	MetadumperService(const std::string &socketPath);
-	~MetadumperService();
+    MetadumperService(const std::string& socketPath);
+    ~MetadumperService();
 
-	bool start();
-	void stop();
-	bool isRunning() const;
+    bool start();
+    void stop();
+    void run();
+    bool isRunning() const;
 
 private:
-	void serverLoop();
-	void handleClient(int clientSocket);
-	bool processDumpRequest(const DumpRequest &request, DumpResponse &response);
-	void cleanupOldFiles();
+    void handleClient(int clientSocket);
+    bool processDumpRequest(const DumpRequest& request, DumpResponse& response);
+    void cleanupOldFiles();
+    void rotateFiles(const std::string& baseFilename, int maxCopies);
 
-	std::string socketPath_;
-	int serverSocket_;
-	std::atomic<bool> running_;
-	std::thread serverThread_;
-	std::queue<DumpRequest> requestQueue_;
-	std::unordered_map<std::string, std::string> activeRequests_;
-	mutable std::mutex requestsMutex_;
+    std::string socketPath_;
+    int serverSocket_;
+    std::atomic<bool> running_;
+    std::thread serviceThread_;
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> activeRequests_;
+    mutable std::mutex requestsMutex_;
 };
 
-}  // namespace metadumper
-}  // namespace saunafs
+} // namespace metadumper
+} // namespace safs
 
-#endif  // SAUNAFS_METADUMPER_SERVICE_H
+#endif // SAUNAFS_METADUMPER_SERVICE_H

@@ -1,154 +1,143 @@
+#include "common/platform.h"
+
 #include "master/metadumper_client.h"
 
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <cerrno>
-#include <cstring>
 #include <chrono>
+#include <cstring>
 #include <random>
 #include <sstream>
 
 #include "slogger/slogger.h"
 
-namespace saunafs {
+namespace safs {
 namespace metadumper {
 
-MetadumperClient::MetadumperClient(const std::string& socketPath)
-    : socketPath_(socketPath), socket_(-1), connected_(false) {
-}
+MetadumperClient::MetadumperClient(const std::string &socketPath)
+    : socketPath_(socketPath), socket_(-1), connected_(false) {}
 
-MetadumperClient::~MetadumperClient() {
-    disconnect();
-}
+MetadumperClient::~MetadumperClient() { disconnect(); }
 
 bool MetadumperClient::isServiceAvailable() {
-    if (connected_) {
-        return true;
-    }
+	if (connected_) { return true; }
 
-    bool available = connectToService();
-    if (available) {
-        disconnect(); // Just testing availability
-    }
-    return available;
+	bool available = connectToService();
+	if (available) {
+		disconnect();  // Just testing availability
+	}
+	return available;
 }
 
-std::string MetadumperClient::sendDumpRequest(uint64_t checksum, const std::string& changelogFile,
-                                            const std::string& outputPath, const std::string& metadataFile,
-                                            int storedMetaCopies) {
-    if (!connectToService()) {
-        return "";
-    }
+std::string MetadumperClient::sendDumpRequest(uint64_t checksum, const std::string &changelogFile,
+                                              const std::string &outputPath,
+                                              const std::string &metadataFile,
+                                              int storedMetaCopies) {
+	if (!connectToService()) { return ""; }
 
-    DumpRequest request;
-    request.requestId = generateRequestId();
-    request.checksum = checksum;
-    request.changelogFile = changelogFile;
-    request.outputPath = outputPath;
-    request.metadataFile = metadataFile;
-    request.storedMetaCopies = storedMetaCopies;
+	DumpRequest request;
+	request.requestId = generateRequestId();
+	request.checksum = checksum;
+	request.changelogFile = changelogFile;
+	request.outputPath = outputPath;
+	request.metadataFile = metadataFile;
+	request.storedMetaCopies = storedMetaCopies;
 
-    std::string requestData = request.serialize();
+	std::string requestData = request.serialize();
 
-    if (send(socket_, requestData.c_str(), requestData.length(), 0) == -1) {
-        safs_pretty_errlog(LOG_ERR, "Failed to send dump request");
-        disconnect();
-        return "";
-    }
+	if (send(socket_, requestData.c_str(), requestData.length(), 0) == -1) {
+		safs_pretty_errlog(LOG_ERR, "Failed to send dump request");
+		disconnect();
+		return "";
+	}
 
-    return request.requestId;
+	return request.requestId;
 }
 
-bool MetadumperClient::pollStatus(const std::string& requestId, DumpResponse& response) {
-	(void)requestId; // Currently unused, as we handle one request at a time
-    if (!connected_) {
-        return false;
-    }
+bool MetadumperClient::pollStatus(const std::string &requestId, DumpResponse &response) {
+	(void)requestId;  // Currently unused, as we handle one request at a time
+	if (!connected_) { return false; }
 
-    char buffer[4096];
-    ssize_t bytesRead = recv(socket_, buffer, sizeof(buffer) - 1, MSG_DONTWAIT);
+	char buffer[4096];
+	ssize_t bytesRead = recv(socket_, buffer, sizeof(buffer) - 1, MSG_DONTWAIT);
 
-    if (bytesRead == -1) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return false; // No data available yet
-        }
-        safs_pretty_errlog(LOG_ERR, "Failed to receive dump response");
-        disconnect();
-        return false;
-    }
+	if (bytesRead == -1) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			return false;  // No data available yet
+		}
+		safs_pretty_errlog(LOG_ERR, "Failed to receive dump response");
+		disconnect();
+		return false;
+	}
 
-    if (bytesRead == 0) {
-        disconnect();
-        return false;
-    }
+	if (bytesRead == 0) {
+		disconnect();
+		return false;
+	}
 
-    buffer[bytesRead] = '\0';
+	buffer[bytesRead] = '\0';
 
-    try {
-        response = DumpResponse::deserialize(std::string(buffer));
-        disconnect(); // Request completed
-        return true;
-    } catch (const std::exception& e) {
-        safs_pretty_syslog(LOG_ERR, "Failed to deserialize dump response: %s", e.what());
-        disconnect();
-        return false;
-    }
+	try {
+		response = DumpResponse::deserialize(std::string(buffer));
+		disconnect();  // Request completed
+		return true;
+	} catch (const std::exception &e) {
+		safs_pretty_syslog(LOG_ERR, "Failed to deserialize dump response: %s", e.what());
+		disconnect();
+		return false;
+	}
 }
 
 bool MetadumperClient::connectToService() {
-    if (connected_) {
-        return true;
-    }
+	if (connected_) { return true; }
 
-    socket_ = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (socket_ == -1) {
-        safs_pretty_errlog(LOG_ERR, "Failed to create socket");
-        return false;
-    }
+	socket_ = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (socket_ == -1) {
+		safs_pretty_errlog(LOG_ERR, "Failed to create socket");
+		return false;
+	}
 
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, socketPath_.c_str(), sizeof(addr.sun_path) - 1);
+	struct sockaddr_un addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	strncpy(addr.sun_path, socketPath_.c_str(), sizeof(addr.sun_path) - 1);
 
-    if (connect(socket_, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
-        safs_pretty_errlog(LOG_WARNING, "Failed to connect to metadumper service");
-        close(socket_);
-        socket_ = -1;
-        return false;
-    }
+	if (connect(socket_, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
+		safs_pretty_errlog(LOG_WARNING, "Failed to connect to metadumper service");
+		close(socket_);
+		socket_ = -1;
+		return false;
+	}
 
-    connected_ = true;
-    return true;
+	connected_ = true;
+	return true;
 }
 
 void MetadumperClient::disconnect() {
-    if (socket_ != -1) {
-        close(socket_);
-        socket_ = -1;
-    }
-    connected_ = false;
+	if (socket_ != -1) {
+		close(socket_);
+		socket_ = -1;
+	}
+	connected_ = false;
 }
 
 std::string MetadumperClient::generateRequestId() {
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    static std::uniform_int_distribution<> dis(0, 15);
+	static std::random_device rd;
+	static std::mt19937 gen(rd());
+	static std::uniform_int_distribution<> dis(0, 15);
 
-    std::ostringstream oss;
-    auto now = std::chrono::system_clock::now();
-    auto time_t = std::chrono::system_clock::to_time_t(now);
+	std::ostringstream oss;
+	auto now = std::chrono::system_clock::now();
+	auto time_t = std::chrono::system_clock::to_time_t(now);
 
-    oss << time_t << "_";
+	oss << time_t << "_";
 
-    for (int i = 0; i < 8; ++i) {
-        oss << std::hex << dis(gen);
-    }
+	for (int i = 0; i < 8; ++i) { oss << std::hex << dis(gen); }
 
-    return oss.str();
+	return oss.str();
 }
 
-} // namespace metadumper
-} // namespace saunafs
-
+}  // namespace metadumper
+}  // namespace safs

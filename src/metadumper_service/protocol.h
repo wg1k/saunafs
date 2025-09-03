@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <string>
 
-namespace saunafs {
+namespace safs {
 namespace metadumper {
 
 struct DumpRequest {
@@ -32,6 +32,6 @@ struct DumpResponse {
 };
 
 }  // namespace metadumper
-}  // namespace saunafs
+}  // namespace safs
 
 #endif  // SAUNAFS_METADUMPER_PROTOCOL_H

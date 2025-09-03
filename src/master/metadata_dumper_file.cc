@@ -42,17 +42,17 @@ MetadataDumperFile::MetadataDumperFile(const std::string &metadataFilename,
       dumpingProcessOutputEmpty_(true),
       metadataFilename_(metadataFilename),
       metadataTmpFilename_(metadataTmpFilename) {
-    
+
     // Load configuration
-    auto& config = saunafs::metadumper::MetadumperConfig::getInstance();
-    config.loadFromEnvironment();
-    
+    auto& config = safs::metadumper::MetadumperConfig::getInstance();
+    config.load();
+
     serviceSocketPath_ = config.getServiceSocketPath();
-    
+
     // Only initialize service client if service architecture is enabled
     if (config.useServiceArchitecture()) {
         try {
-            serviceClient_ = std::make_unique<saunafs::metadumper::MetadumperClient>(serviceSocketPath_);
+            serviceClient_ = std::make_unique<safs::metadumper::MetadumperClient>(serviceSocketPath_);
         } catch (const std::exception& e) {
             safs_pretty_syslog(LOG_WARNING, "Failed to initialize metadumper client: %s", e.what());
             serviceClient_ = nullptr;
@@ -112,8 +112,8 @@ bool MetadataDumperFile::start(DumpType &dumpType, uint64_t checksum) {
 		return false;
 	}
 
-	auto& config = saunafs::metadumper::MetadumperConfig::getInstance();
-	
+	auto& config = safs::metadumper::MetadumperConfig::getInstance();
+
 	// If service architecture is disabled, use original fork-based approach
 	if (!config.useServiceArchitecture()) {
 		return startOriginalForkBased(dumpType, checksum);
@@ -122,16 +122,16 @@ bool MetadataDumperFile::start(DumpType &dumpType, uint64_t checksum) {
 	// Reset state for service-based approach
 	dumpingProcessFd_ = -1;
 	currentRequestId_.clear();
-	
+
 	/*
 	 * Changelog files were rotated before entering this function.
 	 * Current changelog is now kChangelogFilename + ".1".
 	 */
 	std::string changelogFilename = kChangelogFilename;
 	changelogFilename += ".1";
-	
+
 	// Check if service is enabled and available
-	if (config.isServiceEnabled() && useMetarestore_ && dumpingSucceeded_ && 
+	if (config.isServiceEnabled() && useMetarestore_ && dumpingSucceeded_ &&
 	    serviceClient_ && serviceClient_->isServiceAvailable()) {
 		// Check if changelog file exists
 		if (access(changelogFilename.c_str(), F_OK) == -1) {
@@ -146,7 +146,7 @@ bool MetadataDumperFile::start(DumpType &dumpType, uint64_t checksum) {
 			std::string outputDir = metadataTmpFilename_.substr(0, metadataTmpFilename_.find_last_of("/"));
 			currentRequestId_ = serviceClient_->sendDumpRequest(
 				checksum, changelogFilename, outputDir, metadataFilename_, gStoredPreviousBackMetaCopies);
-			
+
 			if (!currentRequestId_.empty()) {
 				safs::log_info("Sent dump request to service with ID: {}", currentRequestId_);
 				dumpingProcessFd_ = 1; // Use dummy fd to indicate service request is active
@@ -172,10 +172,10 @@ bool MetadataDumperFile::start(DumpType &dumpType, uint64_t checksum) {
 
 bool MetadataDumperFile::startOriginalForkBased(DumpType& dumpType, uint64_t checksum) {
 	safs_pretty_syslog(LOG_INFO, "Using original fork-based metadata dumping");
-	
+
 	int pipeFd[2] = {-1, -1};
 	dumpingProcessFd_ = -1;
-	
+
 	/*
 	 * Changelog files were rotated before entering this function.
 	 * Current changelog is now kChangelogFilename + ".1".
@@ -273,12 +273,12 @@ void MetadataDumperFile::pollServe(const std::vector<pollfd> &pdesc) {
 
 	// Check if we're using the service
 	if (!currentRequestId_.empty() && serviceClient_) {
-		saunafs::metadumper::DumpResponse response;
+		safs::metadumper::DumpResponse response;
 		if (serviceClient_->pollStatus(currentRequestId_, response)) {
 			// Request completed
 			dumpingProcessOutputEmpty_ = false;
 			dumpingSucceeded_ = response.success;
-			
+
 			if (response.success) {
 				safs::log_info("Service metadata dump completed successfully: {}", response.outputFile);
 				// Handle file transfer if needed (for remote service)
@@ -286,12 +286,12 @@ void MetadataDumperFile::pollServe(const std::vector<pollfd> &pdesc) {
 			} else {
 				safs::log_warn("Service metadata dump failed: {}", response.errorMessage);
 				// Mark service as failed for future requests
-				auto& config = saunafs::metadumper::MetadumperConfig::getInstance();
+				auto& config = safs::metadumper::MetadumperConfig::getInstance();
 				if (!config.isFallbackEnabled()) {
 					dumpingSucceeded_ = false;
 				}
 			}
-			
+
 			dumpingFinished();
 			return;
 		}
@@ -338,7 +338,7 @@ void MetadataDumperFile::dumpingFinished() {
 		}
 		dumpingProcessFd_ = -1;
 	}
-	
+
 	dumpingProcessPollFdsPos_ = -1;
 	if (dumpingProcessOutputEmpty_) {
 		safs_pretty_syslog(LOG_WARNING, "the dumping process finished without producing output");
