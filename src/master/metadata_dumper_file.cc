@@ -108,7 +108,9 @@ void MetadataDumperFile::setUseMetarestore(bool useMetarestore) {
  */
 
 bool MetadataDumperFile::start(DumpType &dumpType, uint64_t checksum) {
+	safs::log_info("[BALDOR] TRACE: MetadataDumperFile::start");
 	if (dumpType == DumpType::kForegroundDump) {
+		safs::log_info("[BALDOR] TRACE: MetadataDumperFile::start: dumpType == DumpType::kForegroundDump");
 		return false;
 	}
 
@@ -116,6 +118,7 @@ bool MetadataDumperFile::start(DumpType &dumpType, uint64_t checksum) {
 
 	// If service architecture is disabled, use original fork-based approach
 	if (!config.useServiceArchitecture()) {
+		safs::log_info("[BALDOR] TRACE: MetadataDumperFile::start: !config.useServiceArchitecture()");
 		return startOriginalForkBased(dumpType, checksum);
 	}
 
@@ -133,6 +136,7 @@ bool MetadataDumperFile::start(DumpType &dumpType, uint64_t checksum) {
 	// Check if service is enabled and available
 	if (config.isServiceEnabled() && useMetarestore_ && dumpingSucceeded_ &&
 	    serviceClient_ && serviceClient_->isServiceAvailable()) {
+		safs::log_info("[BALDOR] TRACE: MetadataDumperFile::start: service enabled and available");
 		// Check if changelog file exists
 		if (access(changelogFilename.c_str(), F_OK) == -1) {
 			if (errno == ENOENT || errno == EACCES) {
@@ -142,6 +146,7 @@ bool MetadataDumperFile::start(DumpType &dumpType, uint64_t checksum) {
 			}
 			dumpingSucceeded_ = false;
 		} else {
+			safs::log_info("[BALDOR] TRACE: MetadataDumperFile::start: send dump request to service");
 			// Send dump request to service
 			std::string outputDir = metadataTmpFilename_.substr(0, metadataTmpFilename_.find_last_of("/"));
 			currentRequestId_ = serviceClient_->sendDumpRequest(
@@ -157,6 +162,7 @@ bool MetadataDumperFile::start(DumpType &dumpType, uint64_t checksum) {
 			}
 		}
 	}
+	safs::log_info("[BALDOR] TRACE: MetadataDumperFile::start: fallback to original fork-based approach");
 
 	// Check if fallback is enabled
 	if (!config.isFallbackEnabled()) {
@@ -171,6 +177,7 @@ bool MetadataDumperFile::start(DumpType &dumpType, uint64_t checksum) {
 }
 
 bool MetadataDumperFile::startOriginalForkBased(DumpType& dumpType, uint64_t checksum) {
+	safs::log_info("[BALDOR] TRACE: MetadataDumperFile::startOriginalForkBased");
 	safs_pretty_syslog(LOG_INFO, "Using original fork-based metadata dumping");
 
 	int pipeFd[2] = {-1, -1};

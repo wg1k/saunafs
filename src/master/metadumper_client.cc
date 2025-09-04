@@ -11,6 +11,7 @@
 #include <random>
 #include <sstream>
 
+#include "config/cfg.h"
 #include "slogger/slogger.h"
 
 namespace safs {
@@ -22,12 +23,18 @@ MetadumperClient::MetadumperClient(const std::string &socketPath)
 MetadumperClient::~MetadumperClient() { disconnect(); }
 
 bool MetadumperClient::isServiceAvailable() {
-	if (connected_) { return true; }
+	safs::log_info("[BALDOR] TRACE: MetadumperClient::isServiceAvailable");
+	if (connected_) {
+		safs::log_info("[BALDOR] TRACE: MetadumperClient::isServiceAvailable: connected");
+		return true;
+	}
 
 	bool available = connectToService();
 	if (available) {
+		safs::log_info("[BALDOR] TRACE: MetadumperClient::isServiceAvailable: connected");
 		disconnect();  // Just testing availability
 	}
+	safs::log_info("[BALDOR] TRACE: MetadumperClient::isServiceAvailable: available = {}", available);
 	return available;
 }
 
@@ -35,6 +42,7 @@ std::string MetadumperClient::sendDumpRequest(uint64_t checksum, const std::stri
                                               const std::string &outputPath,
                                               const std::string &metadataFile,
                                               int storedMetaCopies) {
+	safs::log_info("[BALDOR] TRACE: MetadumperClient::sendDumpRequest");
 	if (!connectToService()) { return ""; }
 
 	DumpRequest request;
@@ -42,13 +50,13 @@ std::string MetadumperClient::sendDumpRequest(uint64_t checksum, const std::stri
 	request.checksum = checksum;
 	request.changelogFile = changelogFile;
 	request.outputPath = outputPath;
-	request.metadataFile = metadataFile;
+	request.metadataFile = cfg_get("DATA_PATH", DATA_PATH) + "/" + metadataFile;
 	request.storedMetaCopies = storedMetaCopies;
 
 	std::string requestData = request.serialize();
 
 	if (send(socket_, requestData.c_str(), requestData.length(), 0) == -1) {
-		safs_pretty_errlog(LOG_ERR, "Failed to send dump request");
+		safs::log_error_code(errno, "Failed to send dump request");
 		disconnect();
 		return "";
 	}
@@ -58,7 +66,11 @@ std::string MetadumperClient::sendDumpRequest(uint64_t checksum, const std::stri
 
 bool MetadumperClient::pollStatus(const std::string &requestId, DumpResponse &response) {
 	(void)requestId;  // Currently unused, as we handle one request at a time
-	if (!connected_) { return false; }
+	safs::log_info("[BALDOR] TRACE: MetadumperClient::pollStatus");
+	if (!connected_) {
+		safs::log_info("[BALDOR] TRACE: MetadumperClient::pollStatus: not connected");
+		return false;
+	}
 
 	char buffer[4096];
 	ssize_t bytesRead = recv(socket_, buffer, sizeof(buffer) - 1, MSG_DONTWAIT);
@@ -67,7 +79,7 @@ bool MetadumperClient::pollStatus(const std::string &requestId, DumpResponse &re
 		if (errno == EAGAIN || errno == EWOULDBLOCK) {
 			return false;  // No data available yet
 		}
-		safs_pretty_errlog(LOG_ERR, "Failed to receive dump response");
+		safs::log_error_code(errno, "Failed to receive dump response");
 		disconnect();
 		return false;
 	}
@@ -84,7 +96,7 @@ bool MetadumperClient::pollStatus(const std::string &requestId, DumpResponse &re
 		disconnect();  // Request completed
 		return true;
 	} catch (const std::exception &e) {
-		safs_pretty_syslog(LOG_ERR, "Failed to deserialize dump response: %s", e.what());
+		safs::log_exception(e, "Failed to deserialize dump response");
 		disconnect();
 		return false;
 	}
@@ -95,7 +107,7 @@ bool MetadumperClient::connectToService() {
 
 	socket_ = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (socket_ == -1) {
-		safs_pretty_errlog(LOG_ERR, "Failed to create socket");
+		safs::log_error_code(errno, "Failed to create socket");
 		return false;
 	}
 
@@ -105,13 +117,14 @@ bool MetadumperClient::connectToService() {
 	strncpy(addr.sun_path, socketPath_.c_str(), sizeof(addr.sun_path) - 1);
 
 	if (connect(socket_, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
-		safs_pretty_errlog(LOG_WARNING, "Failed to connect to metadumper service");
+		safs::log_error_code(errno, "Failed to connect to metadumper service");
 		close(socket_);
 		socket_ = -1;
 		return false;
 	}
 
 	connected_ = true;
+	safs::log_info("[BALDOR] TRACE: MetadumperClient::connectToService: connected");
 	return true;
 }
 
@@ -121,9 +134,11 @@ void MetadumperClient::disconnect() {
 		socket_ = -1;
 	}
 	connected_ = false;
+	safs::log_info("[BALDOR] TRACE: MetadumperClient::disconnect");
 }
 
 std::string MetadumperClient::generateRequestId() {
+	safs::log_info("[BALDOR] TRACE: MetadumperClient::generateRequestId");
 	static std::random_device rd;
 	static std::mt19937 gen(rd());
 	static std::uniform_int_distribution<> dis(0, 15);

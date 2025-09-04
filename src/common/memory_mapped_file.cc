@@ -105,8 +105,7 @@ MemoryMappedFile::Impl::Impl(const std::string &path) {
 			throw std::runtime_error("Failed to mmap file '" + path + "'");
 		}
 	} catch (std::exception &e) {
-		safs_pretty_syslog(LOG_ERR, "Failed to map file '%s': %s", path.c_str(),
-		                   e.what());
+		safs::log_exception(e, "Failed to map file: {}", path.c_str());
 		throw e;
 	}
 }

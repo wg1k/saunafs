@@ -1,0 +1,20 @@
+[Unit]
+Description=SaunaFS Metadumper Service
+After=network.target
+After=network-online.target
+Wants=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=@SBIN_SUBDIR@/sfsmetadumper -c @ETC_SUBDIR@/sfsmetadumper.cfg start
+ExecReload=@SBIN_SUBDIR@/sfsmetadumper -c @ETC_SUBDIR@/sfsmetadumper.cfg reload
+ExecStop=@SBIN_SUBDIR@/sfsmetadumper -c @ETC_SUBDIR@/sfsmetadumper.cfg stop
+ExecStopPost=/bin/rm -f @RUN_SUBDIR@/saunafs/metadumper.sock
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

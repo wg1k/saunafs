@@ -344,11 +344,11 @@ int main(int argc,char **argv) {
 	}
 	try {
 		if (fs_init(metadata.c_str(), ignoreflag, noLock) != 0) {
-			safs_pretty_syslog(LOG_NOTICE, "error: can't read metadata from file: %s", metadata.c_str());
+			safs::log_error_code(errno, "error: can't read metadata from file: {}", metadata.c_str());
 			return 1;
 		}
 	} catch (const std::exception& e) {
-		safs_pretty_syslog(LOG_ERR, "error: can't read metadata from file: %s, %s", metadata.c_str(), e.what());
+		safs::log_exception(e, "error: can't read metadata from file: {}", metadata.c_str());
 		return 1;
 	}
 	if (fs_getversion() == 0) {

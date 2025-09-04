@@ -3,6 +3,8 @@ timeout_set 90 seconds
 master_extra_config="SFSMETARESTORE_PATH = $TEMP_DIR/metarestore.sh"
 master_extra_config+="|MAGIC_PREFER_BACKGROUND_DUMP = 1"
 master_extra_config+="|BACK_META_KEEP_PREVIOUS = 5"
+master_extra_config+="|METADUMPER_SERVICE_ENABLED = 1"
+master_extra_config+="|METADUMPER_USE_SERVICE_ARCHITECTURE = 1"
 
 CHUNKSERVERS=3 \
 	USE_RAMDISK=YES \

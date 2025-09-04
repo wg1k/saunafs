@@ -4,6 +4,10 @@ assert_program_installed setfacl getfacl
 
 master_cfg="METADATA_DUMP_PERIOD_SECONDS = 0"
 master_cfg+="|MAGIC_DEBUG_LOG = $TEMP_DIR/syslog|LOG_FLUSH_ON=TRACE"
+master_cfg+="|MAGIC_PREFER_BACKGROUND_DUMP = 1"
+master_cfg+="|METADUMPER_SERVICE_ENABLED = 1"
+master_cfg+="|METADUMPER_USE_SERVICE_ARCHITECTURE = 1"
+master_CFG+="|METADUMPER_SERVICE_SOCKET = /run/saunafs/metadumper.sock"
 touch "$TEMP_DIR/syslog"
 
 export SAUNAFS_LOG_LEVEL=trace

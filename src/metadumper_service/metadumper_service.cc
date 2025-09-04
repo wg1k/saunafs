@@ -26,7 +26,7 @@ bool MetadumperService::start() {
 
 	serverSocket_ = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (serverSocket_ == -1) {
-		safs_pretty_errlog(LOG_ERR, "socket creation failed");
+		safs::log_err("socket creation failed");
 		return false;
 	}
 
@@ -39,13 +39,13 @@ bool MetadumperService::start() {
 	unlink(socketPath_.c_str());
 
 	if (bind(serverSocket_, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
-		safs_pretty_errlog(LOG_ERR, "socket bind failed");
+		safs::log_error_code(errno, "socket bind failed on path: {}", socketPath_);
 		close(serverSocket_);
 		return false;
 	}
 
 	if (listen(serverSocket_, 5) == -1) {
-		safs_pretty_errlog(LOG_ERR, "socket listen failed");
+		safs::log_err("socket listen failed");
 		close(serverSocket_);
 		return false;
 	}
@@ -53,7 +53,7 @@ bool MetadumperService::start() {
 	running_.store(true);
 	serviceThread_ = std::thread(&MetadumperService::run, this);
 
-	safs_pretty_syslog(LOG_INFO, "Metadumper service started on socket: %s", socketPath_.c_str());
+	safs::log_info("Metadumper service started on socket: {}", socketPath_);
 	return true;
 }
 
@@ -70,7 +70,7 @@ void MetadumperService::stop() {
 	if (serviceThread_.joinable()) { serviceThread_.join(); }
 
 	unlink(socketPath_.c_str());
-	safs_pretty_syslog(LOG_INFO, "Metadumper service stopped");
+	safs::log_info("Metadumper service stopped");
 }
 
 bool MetadumperService::isRunning() const { return running_.load(); }
@@ -88,7 +88,7 @@ void MetadumperService::run() {
         int result = select(serverSocket_ + 1, &readfds, nullptr, nullptr, &timeout);
         if (result == -1) {
             if (errno != EINTR) {
-                safs_pretty_errlog(LOG_ERR, "select failed in server loop");
+                safs::log_err("select failed in server loop");
             }
             continue;
         }
@@ -127,6 +127,7 @@ void MetadumperService::handleClient(int clientSocket) {
 		std::string responseData = response.serialize();
 		send(clientSocket, responseData.c_str(), responseData.length(), 0);
 	} catch (const std::exception &e) {
+		safs::log_exception(e, "Failed to process dump request");
 		DumpResponse errorResponse;
 		errorResponse.success = false;
 		errorResponse.errorMessage = e.what();
@@ -154,7 +155,7 @@ bool MetadumperService::processDumpRequest(const DumpRequest &request, DumpRespo
 			try {
 				rotateFiles(outputFile, request.storedMetaCopies);
 			} catch (const std::exception &e) {
-				safs_pretty_syslog(LOG_WARNING, "Failed to rotate backup files: %s", e.what());
+				safs::log_exception(e, "Failed to rotate backup files");
 			}
 		}
 
@@ -188,14 +189,13 @@ bool MetadumperService::processDumpRequest(const DumpRequest &request, DumpRespo
 		for (const auto &arg : args) { argv.push_back(const_cast<char *>(arg.c_str())); }
 		argv.push_back(nullptr);
 
-		safs_pretty_syslog(LOG_INFO, "Executing sfsmetarestore for dump request %s",
-		                   request.requestId.c_str());
+		safs::log_info("Executing sfsmetarestore for dump request {}", request.requestId);
 
 		// Create pipe for communication with child process
 		int pipeFd[2];
 		if (pipe(pipeFd) != 0) {
 			response.errorMessage = "Failed to create pipe for sfsmetarestore communication";
-			safs_pretty_syslog(LOG_ERR, "Failed to create pipe: %s", strerror(errno));
+			safs::log_error_code(errno, response.errorMessage);
 			return false;
 		}
 
@@ -205,7 +205,7 @@ bool MetadumperService::processDumpRequest(const DumpRequest &request, DumpRespo
 			close(pipeFd[0]);
 			close(pipeFd[1]);
 			response.errorMessage = "Failed to fork process for sfsmetarestore";
-			safs_pretty_syslog(LOG_ERR, "Failed to fork: %s", strerror(errno));
+			safs::log_error_code(errno, response.errorMessage);
 			return false;
 		} else if (pid == 0) {
 			// Child process
@@ -213,19 +213,19 @@ bool MetadumperService::processDumpRequest(const DumpRequest &request, DumpRespo
 
 			// Redirect stdout to pipe
 			if (dup2(pipeFd[1], STDOUT_FILENO) == -1) {
-				safs_pretty_syslog(LOG_ERR, "Failed to redirect stdout: %s", strerror(errno));
+				safs::log_error_code(errno, "Failed to redirect stdout");
 				exit(1);
 			}
 			close(pipeFd[1]);
 
 			// Set nice value for lower priority
 			if (nice(10) == -1) {
-				safs_pretty_syslog(LOG_WARNING, "Failed to set nice value: %s", strerror(errno));
+				safs::log_error_code(errno, "Failed to set nice value");
 			}
 
 			// Execute sfsmetarestore
 			execv(metarestorePath.c_str(), argv.data());
-			safs_pretty_syslog(LOG_ERR, "Failed to execute sfsmetarestore: %s", strerror(errno));
+			safs::log_error_code(errno, "Failed to execute sfsmetarestore");
 			exit(1);
 		} else {
 			// Parent process
@@ -246,8 +246,7 @@ bool MetadumperService::processDumpRequest(const DumpRequest &request, DumpRespo
 			int status;
 			if (waitpid(pid, &status, 0) == -1) {
 				response.errorMessage = "Failed to wait for sfsmetarestore process";
-				safs_pretty_syslog(LOG_ERR, "Failed to wait for child process: %s",
-				                   strerror(errno));
+				safs::log_error_code(errno, response.errorMessage);
 				return false;
 			}
 
@@ -255,12 +254,11 @@ bool MetadumperService::processDumpRequest(const DumpRequest &request, DumpRespo
 			if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
 				// Success
 				response.outputFile = outputFile;
-				safs_pretty_syslog(LOG_INFO, "Successfully completed dump request %s, output: %s",
-				                   request.requestId.c_str(), outputFile.c_str());
+				safs::log_info("Successfully completed dump request {}, output: {}", request.requestId, outputFile);
 
 				// Parse output for any additional information
 				if (!output.empty() && output.find("OK") != std::string::npos) {
-					safs_pretty_syslog(LOG_INFO, "sfsmetarestore output: %s", output.c_str());
+					safs::log_info("sfsmetarestore output: {}", output);
 				}
 
 				return true;
@@ -269,8 +267,7 @@ bool MetadumperService::processDumpRequest(const DumpRequest &request, DumpRespo
 				response.errorMessage =
 				    "sfsmetarestore failed with exit code: " + std::to_string(WEXITSTATUS(status));
 				if (!output.empty()) { response.errorMessage += ", output: " + output; }
-				safs_pretty_syslog(LOG_ERR, "sfsmetarestore failed for request %s: %s",
-				                   request.requestId.c_str(), response.errorMessage.c_str());
+				safs::log_err("sfsmetarestore failed for request {}: {}", request.requestId, response.errorMessage);
 
 				// Clean up failed output file
 				unlink(outputFile.c_str());
@@ -281,13 +278,11 @@ bool MetadumperService::processDumpRequest(const DumpRequest &request, DumpRespo
 	} catch (const std::exception &e) {
 		response.errorMessage =
 		    std::string("Exception during sfsmetarestore execution: ") + e.what();
-		safs_pretty_syslog(LOG_ERR, "Exception during dump request %s: %s",
-		                   request.requestId.c_str(), e.what());
+		safs::log_exception(e, "Exception during dump request {}", request.requestId);
 		return false;
 	} catch (...) {
 		response.errorMessage = "Unknown exception during sfsmetarestore execution";
-		safs_pretty_syslog(LOG_ERR, "Unknown exception during dump request %s",
-		                   request.requestId.c_str());
+		safs::log_err("Unknown exception during dump request {}", request.requestId);
 		return false;
 	}
 }
