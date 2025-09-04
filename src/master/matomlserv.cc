@@ -35,6 +35,7 @@
 #include <syslog.h>
 #include <time.h>
 #include <unistd.h>
+#include <map>
 #include <set>
 
 #include "common/crc.h"
@@ -45,6 +46,7 @@
 #include "common/saunafs_version.h"
 #include "common/sockets.h"
 #include "config/cfg.h"
+#include "errors/saunafs_error_codes.h"
 #include "master/filesystem.h"
 #include "master/metadata_backend_common.h"
 #include <master/metadata_backend_interface.h>
@@ -103,6 +105,10 @@ static uint32_t gMinMetadataSaveRequestPeriod_s;
 /// Timestamp of the last metadata save request
 static uint32_t gLastMetadataSaveRequestTimestamp = 0;
 
+// For tracking remote metadata dumps
+static uint64_t gDumpReqId = 0;
+static std::map<uint64_t, uint32_t> gDumpRequests; // reqid -> timestamp
+
 struct old_changes_entry {
 	uint64_t version;
 	uint32_t length;
@@ -157,11 +163,25 @@ private:
 	ShadowRequests shadowRequests_;
 } gShadowQueue;
 
+void matomlserv_dump_status_cleanup() {
+    uint32_t now = eventloop_time();
+    for (auto it = gDumpRequests.cbegin(); it != gDumpRequests.cend(); ) {
+        if (now > it->second + 3600) { // 1 hour timeout
+            it = gDumpRequests.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 /*! \brief Forward metadata dump status to Shadow queue.
  *
  * \param status - status to be forwarded.
  */
 void matomlserv_broadcast_metadata_saved(uint8_t status) {
+    if (!gDumpRequests.empty()) {
+        gDumpRequests.clear();
+    }
 	gShadowQueue.handleRequests(status);
 }
 
@@ -264,6 +284,49 @@ std::string get_metaloggers_config() {
 		configs[addr.toString()] = eptr->config;
 	}
 	return cfg_yaml_list("metaloggers", configs);
+}
+
+uint32_t matomlserv_metaloggers_count() {
+    uint32_t count = 0;
+    for (matomlserventry *eptr = matomlservhead; eptr; eptr = eptr->next) {
+        if (!eptr->shadow && eptr->mode != KILL) {
+            count++;
+        }
+    }
+    return count;
+}
+
+bool matomlserv_is_dump_in_progress() {
+    matomlserv_dump_status_cleanup();
+    return !gDumpRequests.empty();
+}
+
+uint8_t matomlserv_trigger_metalogger_dump() {
+    matomlserventry *eptr;
+    for (eptr = matomlservhead; eptr; eptr = eptr->next) {
+        if (!eptr->shadow && eptr->mode != KILL) {
+            gDumpReqId++;
+            gDumpRequests[gDumpReqId] = eventloop_time();
+            matomlserv_createpacket(eptr, matoml::dumpMetadata::build(gDumpReqId));
+            safs_pretty_syslog(LOG_INFO, "delegating metadata dump to metalogger: %s", eptr->servstrip);
+            return SAUNAFS_STATUS_OK;
+        }
+    }
+    return SAUNAFS_ERROR_NOTDONE;
+}
+
+void matomlserv_dump_metadata_status(const uint8_t *data, uint32_t length) {
+    uint64_t reqid;
+    uint8_t status;
+    mltoma::dumpMetadataStatus::deserialize(data, length, reqid, status);
+
+    if (gDumpRequests.find(reqid) == gDumpRequests.end()) {
+        safs_pretty_syslog(LOG_WARNING, "received dump status for unknown request id: %" PRIu64, reqid);
+        return;
+    }
+
+    gDumpRequests.erase(reqid);
+    matomlserv_broadcast_metadata_saved(status);
 }
 
 uint32_t matomlserv_shadows_count() {
@@ -697,6 +760,9 @@ void matomlserv_gotpacket(matomlserventry *eptr,uint32_t type,const uint8_t *dat
 			case SAU_MLTOMA_CHANGELOG_APPLY_ERROR:
 				matomlserv_changelog_apply_error(eptr, data, length);
 				break;
+			case SAU_MLTOMA_DUMP_METADATA_STATUS:
+				matomlserv_dump_metadata_status(data, length);
+				break;
 			case SAU_MLTOMA_CLTOMA_PORT:
 				matomlserv_matoclport(eptr, data, length);
 				break;
@@ -739,6 +805,7 @@ void matomlserv_term(void) {
 		free(eaptr);
 	}
 	matomlservhead=NULL;
+    gDumpRequests.clear();
 
 	free(ListenHost);
 	free(ListenPort);
@@ -1081,6 +1148,7 @@ int matomlserv_init(void) {
 	metadataserver::registerFunctionCalledOnPromotion(matomlserv_become_master);
 	eventloop_destructregister(matomlserv_term);
 	eventloop_pollregister(matomlserv_desc,matomlserv_serve);
+    eventloop_timeregister(TIMEMODE_SKIP_LATE, 3600, 0, matomlserv_dump_status_cleanup);
 	if (metadataserver::isMaster()) {
 		matomlserv_become_master();
 	}

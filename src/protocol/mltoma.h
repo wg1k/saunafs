@@ -44,3 +44,6 @@ SAUNAFS_DEFINE_PACKET_SERIALIZATION(
 SAUNAFS_DEFINE_PACKET_SERIALIZATION(
 		mltoma, dumpConfiguration, SAU_MLTOMA_DUMP_CONFIG, 0,
 		std::string, config)
+
+SAUNAFS_DEFINE_PACKET_SERIALIZATION(mltoma, dumpMetadataStatus, SAU_MLTOMA_DUMP_METADATA_STATUS, 0,
+                                    uint64_t, reqid, uint8_t, status)

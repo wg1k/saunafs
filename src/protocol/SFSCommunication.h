@@ -355,6 +355,14 @@ enum class SugidClearMode : uint8_t {
 #define SAU_MLTOMA_DUMP_CONFIG (1000U + 70)
 /// config:STDSTRING
 
+// 0x42F
+#define SAU_MATOML_DUMP_METADATA (1000U + 71)
+/// reqid:64
+
+// 0x430
+#define SAU_MLTOMA_DUMP_METADATA_STATUS (1000U + 72)
+/// reqid:64 status:8
+
 // CHUNKSERVER <-> MASTER
 
 // 0x044C
@@ -403,7 +411,6 @@ enum class SugidClearMode : uint8_t {
 // #define MATOCS_STRUCTURE_LOG (PROTO_BASE+103)
 // version:32 logdata:string (N*[ char:8 ])
 // 0xFF:8 version:64 logdata:string (N*[ char:8 ])
-
 // 0x0068
 // #define MATOCS_STRUCTURE_LOG_ROTATE (PROTO_BASE+104)
 // -

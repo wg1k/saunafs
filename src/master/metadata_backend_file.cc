@@ -28,6 +28,7 @@
 #include <sys/stat.h>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 
 #include <common/cwrap.h>
@@ -164,18 +165,33 @@ void MetadataBackendFile::broadcast_metadata_saved(uint8_t status) {
 }
 
 uint8_t MetadataBackendFile::fs_storeall(DumpType dumpType) {
-	if (gMetadata == nullptr) {
-		// Periodic dump in shadow master or a request from saunafs-admin
-		safs_pretty_syslog(LOG_INFO,
-		                   "Can't save metadata because no metadata is loaded");
-		return SAUNAFS_ERROR_NOTPOSSIBLE;
-	}
-	if (dumper()->inProgress()) {
-		safs_pretty_syslog(LOG_ERR,
-		                   "previous metadata save process hasn't finished yet "
-		                   "- do not start another one");
-		return SAUNAFS_ERROR_TEMP_NOTPOSSIBLE;
-	}
+    if (gMetadata == nullptr) {
+        // Periodic dump in shadow master or a request from saunafs-admin
+        safs_pretty_syslog(LOG_INFO,
+                           "Can't save metadata because no metadata is loaded");
+        return SAUNAFS_ERROR_NOTPOSSIBLE;
+    }
+
+    if (matomlserv_metaloggers_count() > 0) {
+        if (matomlserv_is_dump_in_progress()) {
+            safs_pretty_syslog(LOG_ERR,
+                               "previous metadata save process hasn't finished yet "
+                               "- do not start another one");
+            return SAUNAFS_ERROR_TEMP_NOTPOSSIBLE;
+        }
+        uint8_t status = matomlserv_trigger_metalogger_dump();
+        if (status == SAUNAFS_STATUS_OK) {
+            return SAUNAFS_STATUS_OK;
+        }
+        safs_pretty_syslog(LOG_WARNING, "could not delegate metadata dump to any metalogger, falling back to local dump");
+    }
+
+    if (dumper()->inProgress()) {
+        safs_pretty_syslog(LOG_ERR,
+                           "previous metadata save process hasn't finished yet "
+                           "- do not start another one");
+        return SAUNAFS_ERROR_TEMP_NOTPOSSIBLE;
+    }
 
 	// We are going to do some changes in the data dir right now
 	fs_erase_message_from_lockfile();
@@ -1381,49 +1397,62 @@ void MetadataBackendFile::store_fd(FILE *fd) {
 #endif  // #ifndef METALOGGER
 
 void MetadataBackendFile::init() {
-	if (fs::exists(kMetadataTmpFilename)) {
-		throw MetadataFsConsistencyException(
-		    "temporary metadata file (" + std::string(kMetadataTmpFilename) + ") exists,"
-		    " metadata directory is in dirty state");
-	}
+    if (fs::exists(kMetadataTmpFilename)) {
+        throw MetadataFsConsistencyException(
+            "temporary metadata file (" + std::string(kMetadataTmpFilename) + ") exists,"
+            " metadata directory is in dirty state");
+    }
 
-	std::string metadataFile;
-	bool metadataFileExists = fs::exists(kMetadataFilename);
-	bool legacyMetadataFileExists = fs::exists(kMetadataLegacyFilename);
+    uint64_t latestVersion = 0;
+    std::string metadataFile;
 
-	if (metadataFileExists) { metadataFile = kMetadataFilename; }
+    try {
+        const std::string currentPath = fs::getCurrentWorkingDirectory();
+        for (const auto &p : std::filesystem::directory_iterator(currentPath)) {
+            const std::string filename = p.path().filename().string();
+            if (filename.rfind("metadata.mfs", 0) == 0) {
+                try {
+                    uint64_t version = getVersion(filename);
+                    if (version > latestVersion) {
+                        latestVersion = version;
+                        metadataFile = filename;
+                    }
+                } catch (const MetadataCheckException &e) {
+                    safs_pretty_syslog(LOG_WARNING, "could not check metadata version for %s: %s",
+                                       filename.c_str(), e.what());
+                }
+            }
+        }
+    } catch (const std::filesystem::filesystem_error& e) {
+        safs_pretty_syslog(LOG_ERR, "could not scan for metadata files: %s", e.what());
+    }
 
-	if (metadataFileExists && legacyMetadataFileExists) {
-		metadataFile = kMetadataFilename;
-		safs_pretty_syslog(LOG_WARNING,
-		                   "There are two metadata files in the data path: %s and %s."
-		                   " Please remove the legacy one (%s) to avoid damage to your storage.",
-		                   kMetadataFilename, kMetadataLegacyFilename, kMetadataLegacyFilename);
-	}
+    if (metadataFile.empty()) {
+        bool legacyMetadataFileExists = fs::exists(kMetadataLegacyFilename);
+        if (legacyMetadataFileExists) {
+            metadataFile = kMetadataLegacyFilename;
+            safs_pretty_syslog(
+                LOG_WARNING,
+                "Only Legacy metadata file %s found and will be loaded instead."
+                " You should delete legacy metadata %s on next restart after new metadata %s is created ",
+                metadataFile.c_str(), kMetadataLegacyFilename, kMetadataFilename);
+        }
+    }
 
-	if (!metadataFileExists && legacyMetadataFileExists) {
-		metadataFile = kMetadataLegacyFilename;
-		safs_pretty_syslog(
-		    LOG_WARNING,
-		    "Only Legacy metadata file %s found and will be loaded instead."
-		    " You should delete legacy metadata %s on next restart after new metadata %s is created ",
-		    metadataFile.c_str(), kMetadataLegacyFilename, kMetadataFilename);
-	}
-
-	metadataFile_ = metadataFile;
+    metadataFile_ = metadataFile;
 
 #if !defined(METALOGGER) && !defined(METARESTORE)
-	if (!metadataserver::isMaster() && metadataFile_.empty()) {
-		metadataFile_ = kMetadataFilename;
-	}
+    if (!metadataserver::isMaster() && metadataFile_.empty()) {
+        metadataFile_ = kMetadataFilename;
+    }
 
-	if (metadataserver::isMaster() && !metadataFileExists && !legacyMetadataFileExists) {
-		std::string currentPath = fs::getCurrentWorkingDirectoryNoThrow();
-		throw FilesystemException(
-		    "can't open metadata file " + currentPath + "/" + kMetadataFilename +
-		    ": if this is a new installation create empty metadata by copying " + currentPath +
-		    "/" + kMetadataFilename + ".empty to " + currentPath + "/" + kMetadataFilename);
-	}
+    if (metadataserver::isMaster() && metadataFile_.empty()) {
+        std::string currentPath = fs::getCurrentWorkingDirectoryNoThrow();
+        throw FilesystemException(
+            "can't open metadata file " + currentPath + "/" + kMetadataFilename +
+            ": if this is a new installation create empty metadata by copying " + currentPath +
+            "/" + kMetadataFilename + ".empty to " + currentPath + "/" + kMetadataFilename);
+    }
 #endif
 }
 

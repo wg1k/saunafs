@@ -23,6 +23,8 @@
 #include "common/platform.h"
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 #include "common/metadataserver_list_entry.h"
 
@@ -46,6 +48,25 @@ void matomlserv_broadcast_logrotate();
  * \param status - status to broadcast.
  */
 void matomlserv_broadcast_metadata_saved(uint8_t status);
+
+/*! \brief Trigger metadata dump on a metalogger.
+ *
+ * \return status of the operation.
+ */
+uint8_t matomlserv_trigger_metalogger_dump(void);
+
+/*! \brief Check if a metadata dump is in progress on a metalogger.
+ *
+ * \return true if a dump is in progress, false otherwise.
+ */
+bool matomlserv_is_dump_in_progress(void);
+
+/*! \brief Returns number of connected, non-shadow metaloggers.
+ *
+ * \return number of metaloggers.
+ */
+uint32_t matomlserv_metaloggers_count(void);
+
 int matomlserv_init(void);
 /*
  * Returns 1 if all connections to metaloggers were closed, 0 otherwise
